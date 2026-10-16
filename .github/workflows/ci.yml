@@ -1,0 +1,34 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: release
+            flags: -DCMAKE_BUILD_TYPE=Release
+          - name: asan-ubsan
+            flags: -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSANITIZE=address
+          - name: tsan
+            flags: -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSANITIZE=thread
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtest-dev cmake g++
+      - name: Build
+        run: cmake -S . -B build ${{ matrix.flags }} && cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Smoke-run the tools
+        if: matrix.name == 'release'
+        run: |
+          ./build/itch_gen --messages 2000000 --live 100000 --out feed.itch
+          ./build/itch_replay --file feed.itch
+          ./build/queue_bench --items 2000000 --trips 100000
+          ./build/feed_bench --messages 500000 --rate 1000000
