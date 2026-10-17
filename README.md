@@ -10,7 +10,36 @@ sender ──UDP multicast (MoldUDP64)──▶ receive thread ──lock-free S
                                       a ring slot (no copy)                    prefetch, apply
 ```
 
-## Results
+## Results on a real NASDAQ trading day
+
+This is NASDAQ's full TotalView-ITCH 5.0 capture for 30 Dec 2019: 268,744,780 messages. It is downloaded and run by the [`Real NASDAQ data`](.github/workflows/real-data.yml) workflow on a GitHub-hosted runner (4 vCPUs, Intel Xeon 6973P-C). The raw output is in [`docs/results/real/`](docs/results/real).
+
+**Full-day replay: file → parser → order books for every stock on the feed.**
+
+| | |
+|---|---:|
+| Messages | 268,744,780 |
+| Time (parsing + book updates, prefetch on) | **25 s** |
+| Throughput | **10.7M messages/s, 93 ns/message** |
+| Same, without prefetching | 111 ns/message |
+| Peak resting orders | 1.92M |
+| Order messages for unknown or duplicate references | **0 / 0** |
+| Resting orders left after the close | 0 |
+
+The book reconciles: every execute, cancel, delete and replace in the day matched an order the handler had seen added. At the end of the day no resting orders are left.
+
+Timed individually, per-message cost is p50 81 ns, p99 465 ns and p99.9 719 ns. Prefetching makes the replay 16% faster on real data. Huge pages made no measurable difference on this runner, unlike the cloud VM below.
+
+**Live path on real data.** The first 20M messages of the day are replayed through MoldUDP64 → UDP multicast → SPSC ring → book, paced at 1M msg/s, with the threads pinned. That is 473,899 packets of about 42 messages each, with no packets lost. The table gives per-packet latency (median of 3 runs).
+
+| Hop | p50 | p90 | p99 | p99.9 |
+|---|---:|---:|---:|---:|
+| Send → receive (kernel loopback) | 2.9 µs | 3.3 µs | 4.2 µs | 20 µs |
+| Waiting in the ring | 0.18 µs | 0.23 µs | 2.3 µs | 14 µs |
+| Parse + apply the packet | 3.8 µs | 5.6 µs | 8.6 µs | 22 µs |
+| **End to end** | **7.0 µs** | **9.0 µs** | **15.4 µs** | **39 µs** |
+
+## Results on synthetic data (cloud VM)
 
 Measured on a 4-vCPU cloud VM (Intel Xeon @ 2.8 GHz, 4 MB L2 per core, 33 MB L3), g++ 13.3, `-O3`. Each figure is the median of 3 to 5 runs; the raw output of every run is in [`docs/results/`](docs/results). To reproduce, run `scripts/run_benchmarks.sh`.
 
@@ -46,7 +75,7 @@ When unthrottled, the sender outruns the book thread. The ring fills, the kernel
 
 Removing false sharing doubles throughput. It does not change ping-pong latency, because there is only one item in flight.
 
-**About the tails.** The p99 and p99.9 figures on the live path run from hundreds of microseconds to milliseconds, and they move a lot between runs. The cause is the shared VM rather than the code: the large values come in bursts of consecutive packets, which is what a descheduled vCPU looks like, and the kernel reports steal time on this machine. Measuring meaningful tails would need isolated cores (`isolcpus`, `nohz_full`) on bare metal.
+**About the tails.** The p99 and p99.9 figures on the live path run from hundreds of microseconds to milliseconds, and they move a lot between runs. The cause is the shared VM rather than the code: the large values come in bursts of consecutive packets, which is what a descheduled vCPU looks like, and the kernel reports steal time on this machine. For comparison, the same live path on the less noisy GitHub runner has a real-data p99 of 15 µs (above). Clean tails need isolated cores (`isolcpus`, `nohz_full`) on bare metal.
 
 ## Design decisions
 
@@ -66,9 +95,9 @@ Removing false sharing doubles throughput. It does not change ping-pong latency,
 
 ## Data
 
-NASDAQ publishes sample days of real ITCH data (for example 30 Dec 2019: 268.7M messages, about 8 GB). `scripts/fetch_itch_day.sh` downloads one and runs `itch_replay` on it.
+NASDAQ publishes sample days of real ITCH data. The real-data results above come from the 30 Dec 2019 file, run in GitHub Actions (start it from the Actions tab). `scripts/fetch_itch_day.sh` does the same on your own machine.
 
-The benchmarks above use a synthetic stream from `itch_gen`, because the machine they ran on could not reach NASDAQ's server.
+The synthetic stream from `itch_gen` is for the tests and for machines that cannot reach NASDAQ's server. It is built as follows:
 - The messages are byte-exact ITCH 5.0.
 - The message mix follows the published counts for that 2019 day: adds 44%, deletes 43%, replaces 8%, executions 2%, partial cancels 1%.
 - About one million orders rest at once, and activity is spread across 3,000 stocks by a Zipf law.

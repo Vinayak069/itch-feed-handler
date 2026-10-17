@@ -47,6 +47,6 @@ jobs:
         run: |
           for f in results/*; do
             while IFS= read -r line; do
-              [ -n "$line" ] && echo "::notice title=$(basename "$f")::$line"
+              if [ -n "$line" ]; then echo "::notice title=$(basename "$f")::$line"; fi
             done < "$f"
           done

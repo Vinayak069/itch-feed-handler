@@ -1,0 +1,1 @@
+4 cpus, Model name: Intel(R) Xeon(R) 6973P-C
