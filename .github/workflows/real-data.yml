@@ -1,0 +1,43 @@
+name: Real NASDAQ data
+# Downloads one full trading day of NASDAQ TotalView-ITCH 5.0 (about 4 GB compressed) and runs
+# the replay and live-path benchmarks on it. Started by hand from the Actions tab.
+on:
+  workflow_dispatch:
+    inputs:
+      day:
+        description: NASDAQ sample file date (MMDDYYYY)
+        default: "12302019"
+
+jobs:
+  replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          sudo apt-get update && sudo apt-get install -y libgtest-dev cmake g++
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+      - name: Download
+        run: |
+          curl -fL --retry 3 -o day.gz "https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/${{ inputs.day }}.NASDAQ_ITCH50.gz"
+          ls -l day.gz
+      - name: Replay the full day through the order books
+        run: |
+          mkdir -p results
+          nproc && lscpu | grep "Model name"
+          for opts in "--prefetch 0 --no-huge-pages" "--prefetch 0" "--prefetch 8" "--prefetch 8"; do
+            gunzip -c day.gz | ./build/itch_replay --file /dev/stdin --expected-orders 4000000 $opts | tee -a results/replay_real.jsonl
+          done
+          gunzip -c day.gz | ./build/itch_replay --file /dev/stdin --expected-orders 4000000 --latency | tee results/replay_real_latency.json
+      - name: Live UDP path on the first 20M messages of the day
+        run: |
+          (gunzip -c day.gz | head -c 2000000000 > head.itch) || true  # head closing the pipe early is expected
+          for run in 1 2 3; do
+            ./build/feed_bench --file head.itch --messages 20000000 --rate 1000000 --pin --expected-orders 4000000 | tr -d '\n' | tee -a results/feed_real.jsonl
+            echo >> results/feed_real.jsonl
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: real-data-results
+          path: results/

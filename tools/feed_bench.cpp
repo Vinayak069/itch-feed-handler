@@ -1,8 +1,12 @@
 // End-to-end live-path benchmark: synthetic ITCH -> MoldUDP64 packets -> UDP multicast on
 // loopback -> receive thread -> SPSC ring -> book thread. Prints per-hop latency percentiles.
-//   feed_bench [--messages 5000000] [--rate 1000000] [--pin] [--no-prefetch] [--drop-every N] [--slots 4096]
+//   feed_bench [--file real.itch] [--messages 5000000] [--rate 1000000] [--pin] [--no-prefetch] [--drop-every N] [--slots 4096]
 // --rate 0 sends as fast as the sender can, which shows where packets start being lost.
+#include <cstdio>
+#include <cstring>
 #include <iostream>
+#include <stdexcept>
+#include <vector>
 #include <memory>
 
 #include "args.hpp"
@@ -15,7 +19,25 @@ int main(int argc, char** argv) try {
     g.messages = uint64_t(a.num("messages", 5e6));
     g.live_target = uint64_t(a.num("live", 1e6));
     g.symbols = uint32_t(a.num("symbols", 3000));
-    const auto framed = itch::generate_framed(g);
+    // --file replays the first --messages messages of a real ITCH file instead of synthetic data.
+    std::vector<std::byte> framed;
+    if (a.has("file")) {
+        FILE* f = std::fopen(a.str("file", "").c_str(), "rb");
+        if (!f) throw std::runtime_error("cannot open " + a.str("file", ""));
+        std::byte len[2];
+        for (uint64_t i = 0; i < g.messages && std::fread(len, 1, 2, f) == 2; ++i) {
+            const std::size_t n = itch::be16(len), at = framed.size();
+            framed.resize(at + 2 + n);
+            std::memcpy(framed.data() + at, len, 2);
+            if (std::fread(framed.data() + at + 2, 1, n, f) != n) {
+                framed.resize(at);
+                break;
+            }
+        }
+        std::fclose(f);
+    } else {
+        framed = itch::generate_framed(g);
+    }
     const auto packets = itch::packetize(framed, "BENCH00001");
 
     feed::PipelineConfig cfg;
@@ -29,7 +51,7 @@ int main(int argc, char** argv) try {
         cfg.rx_cpu = int(a.num("rx-cpu", 1));
         cfg.book_cpu = int(a.num("book-cpu", 2));
     }
-    auto book = std::make_unique<book::OrderBook>(1 << 21);
+    auto book = std::make_unique<book::OrderBook>(uint64_t(a.num("expected-orders", 1 << 21)));
     const auto r = feed::run_pipeline(packets, cfg, *book);
 
     std::cout << "{\"messages\": " << packets.messages << ", \"packets\": " << packets.offset.size()
